@@ -50,8 +50,6 @@ const TraeSettingsPage = lazy(() => import("@/pages/TraeSettingsPage"));
 const TraeTokenStatsPage = lazy(() => import("@/pages/TraeTokenStatsPage"));
 import { useCachedResource } from "@/lib/use-cached-resource";
 import { useTraeVariant } from "@/lib/use-trae-variant";
-import { useCreditAutoRefresh } from "@/lib/use-credit-auto-refresh";
-import { useWorkbuddyStatusRefresh } from "@/lib/use-workbuddy-status-refresh";
 import { useAccountsStore } from "@/stores/accounts";
 
 /**
@@ -210,6 +208,14 @@ function useTraeVariantRunning(active: boolean): Record<string, boolean> {
     [data],
   );
 }
+
+/**
+ * 自用 fork：隐藏 WorkBuddy 分区，侧栏不再渲染产品切换器。
+ *
+ * 保留 `ProductSwitch` 的完整实现与相关逻辑（`switchProduct` / `lastPathRef` /
+ * `PRODUCT_NAV` 均不动），只把渲染关掉 —— 将来要恢复多分区时置回 `true` 即可。
+ */
+const SHOW_PRODUCT_SWITCH = false;
 
 /** 侧栏顶部的产品切换：下方的导航与主区域页面都跟随它。 */
 function ProductSwitch({
@@ -414,8 +420,13 @@ function Layout() {
 
   const hasUnifiedTitleBar =
     api.isDesktop() && typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
-  useCreditAutoRefresh();
-  useWorkbuddyStatusRefresh();
+  // WorkBuddy 分区已隐藏（见下方 `product !== "trae"` 的重定向）：不再轮询其运行状态
+  // （`useWorkbuddyStatusRefresh`，每 60s）与积分（`useCreditAutoRefresh`，每 30min）。
+  // 但仍需取一次应用信息 —— `status.version` 供侧栏版本号与「自动更新」卡片使用，
+  // 它们是**应用级**的，不属于 WorkBuddy。
+  useEffect(() => {
+    void useAccountsStore.getState().refreshAllStatus();
+  }, []);
 
   useEffect(() => {
     lastPathRef.current[product] = location.pathname;
@@ -430,6 +441,13 @@ function Layout() {
     // 这类边界不会让变体漂到错误的值）。
     if (next === "trae") setTraeVariant(traeVariant);
     navigate(lastPathRef.current[next] || PRODUCT_HOME[next]);
+  }
+
+  // WorkBuddy 分区已隐藏（自用 fork）：任何非 Trae 路径都重定向到 Trae 账号页。
+  // 刻意放在**这里**而不是改路由表 —— 路由表与 WorkBuddy 页面组件都保留未删，
+  // 只在这一层拦截，改动面最小（见 `SHOW_PRODUCT_SWITCH`）。
+  if (product !== "trae") {
+    return <Navigate to="/trae/accounts" replace />;
   }
 
   return (
@@ -467,7 +485,9 @@ function Layout() {
           </div>
         </div>
 
-        <ProductSwitch product={product} onChange={switchProduct} />
+        {SHOW_PRODUCT_SWITCH ? (
+          <ProductSwitch product={product} onChange={switchProduct} />
+        ) : null}
 
         <nav
           className="flex min-h-0 flex-1 flex-col gap-0.5"

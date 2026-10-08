@@ -422,21 +422,8 @@ fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
 fn build_tray_menu<R: Runtime, M: Manager<R>>(app: &M) -> tauri::Result<Menu<R>> {
     let open_item = MenuItem::with_id(app, "open-main-window", "打开主界面", true, None::<&str>)?;
     let github_item = MenuItem::with_id(app, "open-github", "打开 GitHub", true, None::<&str>)?;
-    let checked_in = checkin::all_accounts_checked_in_today();
-    let (checkin_label, checkin_enabled) = if CHECKIN_BUSY.load(Ordering::Acquire) {
-        ("一键签到", false)
-    } else if checked_in {
-        ("已签到", false)
-    } else {
-        ("一键签到", true)
-    };
-    let checkin_item = MenuItem::with_id(
-        app,
-        "checkin-all",
-        checkin_label,
-        checkin_enabled,
-        None::<&str>,
-    )?;
+    // 自用 fork：WorkBuddy 分区已隐藏，「一键签到」（作用于 WorkBuddy 账号）不再出现在
+    // 托盘菜单里。`start_checkin_all` 与其事件分支**保留未删**，便于将来恢复。
     let lightweight_item = CheckMenuItem::with_id(
         app,
         "lightweight-mode",
@@ -450,7 +437,6 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(app: &M) -> tauri::Result<Menu<R>>
     MenuBuilder::new(app)
         .item(&open_item)
         .item(&github_item)
-        .item(&checkin_item)
         .separator()
         .item(&lightweight_item)
         .separator()
