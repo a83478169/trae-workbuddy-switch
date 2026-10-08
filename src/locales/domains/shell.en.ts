@@ -53,6 +53,15 @@ export const en = {
   "appSettings.language.zh": "简体中文",
   "appSettings.language.en": "English",
 
+  "appSettings.webui.title": "Local WebUI",
+  "appSettings.webui.label": "Browser entry",
+  "appSettings.webui.description":
+    "The desktop app also listens on a local port; open the address below in a browser to use the same UI on the same data as the desktop window.",
+  "appSettings.webui.starting": "Starting…",
+  "appSettings.webui.copy": "Copy",
+  "appSettings.webui.copied": "WebUI address copied",
+  "appSettings.webui.open": "Open",
+
   "appSettings.startup.title": "Startup",
   "appSettings.startup.silent.label": "Start minimized to tray at login",
   "appSettings.startup.silent.description":

@@ -4,6 +4,12 @@ version = "2026.9.301656"
 edition = "2021"
 description = "buddy-switch HTTP server + CLI（npm 安装形态：buddy-switch 命令启动本地 webui）"
 
+# lib + bin：`lib` 供桌面端（`src-tauri`）复用同一份 webui 服务
+# （`api::router()` 与两个网关宿主都是框架无关的），`bin` 仍是 `buddy-switch` CLI。
+[lib]
+name = "buddy_switch_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "buddy-switch"
 path = "src/main.rs"

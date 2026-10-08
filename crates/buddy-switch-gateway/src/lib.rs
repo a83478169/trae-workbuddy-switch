@@ -50,9 +50,27 @@ pub use state::{
 pub use sticky::StickyTable;
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::OnceLock;
 
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+
+/// 进程内共享的 WorkBuddy 网关状态（**每个进程一份**，惰性初始化，读一次配置）。
+///
+/// **为什么下沉到这里**：此前的形态是每个宿主各持一份 `OnceLock`
+/// （`buddy-switch-server` 的 `gateway_host.rs` 与 `src-tauri` 的 `gateway.rs`
+/// 各一个 `static`）。两个独立进程时各一份毫无问题；但桌面端现在会在**同一个进程**
+/// 里同时托管 webui 服务与管理命令，两份 `static` 就意味着两份 [`GatewayState`] ——
+/// 网页端改了网关配置 / Key，桌面窗口看不到（反之亦然）。
+/// 下沉到本 crate 后，同一进程内的所有宿主取到的是同一份。
+///
+/// 独立进程（`buddy-switch-server` 单独跑）行为不变：进程内依旧只有这一份。
+pub fn process_shared_state() -> GatewayState {
+    static SHARED: OnceLock<GatewayState> = OnceLock::new();
+    SHARED
+        .get_or_init(|| GatewayState::new(GatewayConfig::load()))
+        .clone()
+}
 
 /// 组装网关对外路由（**不含 fallback**）。
 ///

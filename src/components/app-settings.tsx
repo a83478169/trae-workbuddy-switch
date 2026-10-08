@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowUpCircle, ExternalLink, Loader2, RefreshCw, Save, Settings2 } from "lucide-react";
+import { ArrowUpCircle, Copy, ExternalLink, Loader2, RefreshCw, Save, Settings2 } from "lucide-react";
 
 import { DemoAction } from "@/components/demo-action";
 import { SettingsFieldRow, SettingsGroup } from "@/components/settings-primitives";
@@ -19,9 +19,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { UpdateInstallDialog } from "@/components/update-install-dialog";
 import * as api from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import { isLocale, setLocale, useLocale, useT } from "@/lib/i18n";
 import { getThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
-import type { GithubConfig, UpdateInfo } from "@/lib/types";
+import type { GithubConfig, UpdateInfo, WebuiInfo } from "@/lib/types";
 import { GITHUB_RELEASE_URL, GITHUB_REPOSITORY_URL, openReleaseUrl } from "@/lib/update";
 import { cn } from "@/lib/utils";
 import { useAccountsStore } from "@/stores/accounts";
@@ -418,6 +419,84 @@ function LanguageCard() {
 }
 
 /**
+ * 「本地 WebUI」卡片：显示内置 webui 服务的接入地址。
+ *
+ * 桌面版**同时在本地监听一个 HTTP 端口**（见桌面端 `webui_host` 模块），浏览器打开
+ * 该地址即可用同一份界面操作同一份数据。这里只读展示地址，不提供开关 ——
+ * 服务默认常开，它是「一个 exe 两种入口」的第二种入口。
+ *
+ * 端口在服务启动后才绑定，因此这里只取一次；启动瞬间可能尚未就绪（显示「正在启动…」）。
+ */
+function WebuiCard() {
+  const t = useT();
+  const [info, setInfo] = useState<WebuiInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getWebuiInfo()
+      .then((value) => {
+        if (!cancelled) setInfo(value);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(api.asError(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const url = info?.url ?? null;
+
+  return (
+    <SettingsGroup id="settings-webui" title={t("appSettings.webui.title")}>
+      <CardContent className="space-y-0 p-0">
+        <SettingsFieldRow
+          className="border-b-0"
+          label={t("appSettings.webui.label")}
+          description={t("appSettings.webui.description")}
+        >
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <code className="rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs">
+              {error ?? url ?? t("appSettings.webui.starting")}
+            </code>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!url}
+              onClick={() => url && void copyText(url, t("appSettings.webui.copied"))}
+            >
+              <Copy />
+              {t("appSettings.webui.copy")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!url}
+              onClick={() => url && void openWebui(url)}
+            >
+              <ExternalLink />
+              {t("appSettings.webui.open")}
+            </Button>
+          </div>
+        </SettingsFieldRow>
+      </CardContent>
+    </SettingsGroup>
+  );
+}
+
+/** 在桌面端用 Tauri opener 打开，在 webui 端开新标签页（与 `openReleaseUrl` 同款分流）。 */
+async function openWebui(url: string): Promise<void> {
+  if (api.isWebui()) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  await openUrl(url);
+}
+
+/**
  * 四个应用级设置块，**门禁与原先设置页逐条对齐**。
  *
  * 门禁必须留在这里而不是交给调用方：本模块同时被侧栏（常驻）与设置页引用，
@@ -431,6 +510,7 @@ export function AppSettingsGroups() {
     <>
       <LanguageCard />
       <AppearanceCard />
+      {api.isDesktop() && !api.isDemoMode() ? <WebuiCard /> : null}
       {api.isDesktop() || api.isDemoMode() ? <StartupCard /> : null}
       {api.isWebui() && !api.isDemoMode() ? null : <UpdateCard />}
     </>

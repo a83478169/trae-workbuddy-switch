@@ -2,6 +2,7 @@
 mod commands;
 mod gateway;
 mod trae_gateway;
+mod webui_host;
 #[cfg(desktop)]
 mod tray;
 
@@ -217,9 +218,20 @@ pub fn run() {
             app.manage(gateway::GatewayRuntime::new());
             // Trae 网关运行时句柄（与上面那份**互不相干**：配置 / Key / 日志全独立）。
             app.manage(trae_gateway::TraeGatewayRuntime::new());
+            // 内置 webui 的运行时句柄（记录**实际**监听端口，供设置页展示）。
+            app.manage(webui_host::WebuiRuntime::new());
             // README 截图模式只渲染前端虚构数据，禁止读取账号后执行签到、轮换或保活。
             if !is_screenshot_demo() {
                 spawn_background_loops();
+                // 内置 webui：桌面进程**同时**在本地监听一个 HTTP 端口，浏览器打开即可用
+                // 同一份界面操作同一份数据（见 `webui_host` 模块文档）。与下面两个网关
+                // 不同，它是**默认常开**的 —— 它是「一个 exe 两种入口」的第二种入口。
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = webui_host::serve(handle).await {
+                        eprintln!("[webui] {error}");
+                    }
+                });
                 // 按配置启动 API 网关独立监听（默认关闭；默认 127.0.0.1:57891）。
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -245,6 +257,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
+            commands::get_webui_info,
             commands::get_accounts,
             commands::get_codebuddy_cli_status,
             commands::install_codebuddy_cli_helper,

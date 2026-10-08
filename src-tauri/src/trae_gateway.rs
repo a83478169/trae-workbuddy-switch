@@ -9,21 +9,20 @@
 //! 代价是重复约 40 行生命周期代码，换来的是**改 Trae 网关不会碰到 WorkBuddy 网关**。
 //! 这正是 `buddy_switch_gateway::trae` 模块的整体设计取向。
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
-use buddy_switch_gateway::trae::{spawn_listener, TraeGatewayConfig, TraeGatewayState};
+use buddy_switch_gateway::trae::{spawn_listener, TraeGatewayState};
 use buddy_switch_gateway::GatewayHandle;
 
-static SHARED_STATE: OnceLock<TraeGatewayState> = OnceLock::new();
-
-/// 进程内共享的 Trae 网关状态（惰性初始化，读一次配置）。
+/// 进程内共享的 Trae 网关状态。
 ///
-/// 独立监听与管理命令复用**同一份**状态，因此「API 服务」页看到的请求日志、
-/// 账号池与真实打进来的请求完全一致。
+/// **委托**给 gateway crate 的每进程单例
+/// （[`buddy_switch_gateway::trae::process_shared_state`]），不再自建 `OnceLock`：
+/// 桌面端在同一进程里同时托管 webui 服务与管理命令，自建会让网页端与桌面端各持
+/// 一份 [`TraeGatewayState`]。独立监听与管理命令仍复用同一份状态，因此
+/// 「API 服务」页看到的请求日志、账号池与真实打进来的请求完全一致。
 pub fn shared_state() -> TraeGatewayState {
-    SHARED_STATE
-        .get_or_init(|| TraeGatewayState::new(TraeGatewayConfig::load()))
-        .clone()
+    buddy_switch_gateway::trae::process_shared_state()
 }
 
 /// 独立监听生命周期（Tauri managed state）。

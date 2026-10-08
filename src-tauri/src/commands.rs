@@ -1107,6 +1107,24 @@ pub async fn save_gateway_config(app: tauri::AppHandle, config: Value) -> Result
     }))
 }
 
+/// GET /api/webui/info —— 内置 webui 的接入信息。
+///
+/// 返回**实际监听**的端口（见 [`crate::webui_host`]）而非默认端口：默认端口被
+/// 占用时宿主会递增重试，显示请求值会让浏览器打不开。`enabled = false`
+/// 表示服务尚未绑定（启动瞬间）。
+#[tauri::command]
+pub fn get_webui_info(app: tauri::AppHandle) -> Value {
+    let runtime = app.state::<crate::webui_host::WebuiRuntime>();
+    match runtime.port() {
+        Some(port) => json!({
+            "enabled": true,
+            "port": port,
+            "url": format!("http://127.0.0.1:{port}"),
+        }),
+        None => json!({ "enabled": false, "port": Value::Null, "url": Value::Null }),
+    }
+}
+
 /// GET /api/gateway/status —— 运行状态。
 ///
 /// **E3.1**：统一复用 [`GatewayStatusView`]（**snake_case**，与 server 的

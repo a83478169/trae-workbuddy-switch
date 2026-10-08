@@ -42,6 +42,14 @@ export const zh = {
   "appSettings.language.zh": "简体中文",
   "appSettings.language.en": "English",
 
+  "appSettings.webui.title": "本地 WebUI",
+  "appSettings.webui.label": "浏览器入口",
+  "appSettings.webui.description": "桌面版同时在本地监听一个端口；在浏览器打开下面的地址，即可用同一份界面操作，数据与桌面窗口完全一致。",
+  "appSettings.webui.starting": "正在启动…",
+  "appSettings.webui.copy": "复制",
+  "appSettings.webui.copied": "WebUI 地址已复制",
+  "appSettings.webui.open": "打开",
+
   "appSettings.startup.title": "启动设置",
   "appSettings.startup.silent.label": "开机时静默启动到托盘",
   "appSettings.startup.silent.description": "开关直接反映系统登录项状态；之后可从托盘「打开主界面」恢复",

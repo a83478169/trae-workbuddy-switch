@@ -15,17 +15,19 @@ use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
 
-use buddy_switch_gateway::trae::{spawn_listener, TraeGatewayConfig, TraeGatewayState};
+use buddy_switch_gateway::trae::{spawn_listener, TraeGatewayState};
 use buddy_switch_gateway::GatewayHandle;
 
-static SHARED_STATE: OnceLock<TraeGatewayState> = OnceLock::new();
 static HOST: OnceLock<Mutex<TraeGatewayHost>> = OnceLock::new();
 
-/// 进程内共享的 Trae 网关状态（惰性初始化，读一次配置）。
+/// 进程内共享的 Trae 网关状态。
+///
+/// **委托**给 gateway crate 的每进程单例
+/// （[`buddy_switch_gateway::trae::process_shared_state`]），不再自建 `OnceLock`：
+/// 桌面端在同一进程里同时托管 webui 服务与管理命令，自建会让两侧各持一份
+/// [`TraeGatewayState`]，账号池 / Key / 请求日志互不可见。
 pub fn shared_state() -> TraeGatewayState {
-    SHARED_STATE
-        .get_or_init(|| TraeGatewayState::new(TraeGatewayConfig::load()))
-        .clone()
+    buddy_switch_gateway::trae::process_shared_state()
 }
 
 /// 独立监听生命周期管理。

@@ -42,6 +42,7 @@ import type {
   TravelConfig,
   TravelStatus,
   UpdateInfo,
+  WebuiInfo,
 } from "./types";
 import { demoModeEnabled, demoUnavailableMessage } from "./demo-mode";
 import { displayText } from "./display-text";
@@ -157,6 +158,7 @@ type Route = { method: "GET" | "POST"; path: string };
 /** Tauri command → HTTP 路由映射（webui 模式）。 */
 const ROUTES: Record<string, Route> = {
   get_status: { method: "GET", path: "/api/status" },
+  get_webui_info: { method: "GET", path: "/api/webui/info" },
   get_accounts: { method: "GET", path: "/api/accounts" },
   get_codebuddy_cli_status: { method: "GET", path: "/api/codebuddy-cli/status" },
   install_codebuddy_cli_helper: { method: "POST", path: "/api/codebuddy-cli/install-helper" },
@@ -393,6 +395,11 @@ function normalizeAppStatus(status: AppStatus): AppStatus {
 
 export function getStatus(region?: Region): Promise<AppStatus> {
   return call<AppStatus>("get_status", region ? { region } : undefined).then(normalizeAppStatus);
+}
+
+/** 本地 WebUI 服务的接入信息（设置页「本地 WebUI」卡片）。 */
+export function getWebuiInfo(): Promise<WebuiInfo> {
+  return call<WebuiInfo>("get_webui_info");
 }
 
 export function getAccounts(region?: Region): Promise<{ accounts: AccountMeta[] }> {

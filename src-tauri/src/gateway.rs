@@ -5,17 +5,17 @@
 //!   独立监听与命令层复用**同一份** [`shared_state`]（E4），因此桌面端发出到
 //!   57891 的真实请求日志 / 目录刷新结果都能在管理页看到。
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
-use buddy_switch_gateway::{spawn_listener_with_state, GatewayConfig, GatewayHandle, GatewayState};
+use buddy_switch_gateway::{spawn_listener_with_state, GatewayHandle, GatewayState};
 
-static SHARED_STATE: OnceLock<GatewayState> = OnceLock::new();
-
-/// 进程内共享的网关状态（惰性初始化，读一次配置）。
+/// 进程内共享的网关状态。
+///
+/// **委托**给 gateway crate 的每进程单例（[`buddy_switch_gateway::process_shared_state`]），
+/// 不再自建 `OnceLock`：桌面端在同一进程里同时托管 webui 服务与管理命令，
+/// 自建会让网页端与桌面端各持一份 [`GatewayState`]，配置 / Key 互不可见。
 pub fn shared_state() -> GatewayState {
-    SHARED_STATE
-        .get_or_init(|| GatewayState::new(GatewayConfig::load()))
-        .clone()
+    buddy_switch_gateway::process_shared_state()
 }
 
 /// 独立监听生命周期（Tauri managed state）。

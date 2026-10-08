@@ -552,6 +552,16 @@ export interface GithubConfig {
   proxy?: string;
 }
 
+/** 本地 WebUI（内置 HTTP 服务）的接入信息（设置页展示用）。 */
+export interface WebuiInfo {
+  /** 服务是否已绑定端口；启动瞬间可能为 false。 */
+  enabled: boolean;
+  /** 实际监听端口；未启用时为 null。 */
+  port: number | null;
+  /** 完整地址 `http://127.0.0.1:<port>`；未启用时为 null。 */
+  url: string | null;
+}
+
 export interface UpdateInfo {
   ok: boolean;
   current?: string;

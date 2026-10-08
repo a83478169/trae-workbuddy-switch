@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -617,6 +617,20 @@ pub async fn status_view(
 // ---------------------------------------------------------------------------
 // 路由与监听
 // ---------------------------------------------------------------------------
+
+/// 进程内共享的 Trae 网关状态（**每个进程一份**，惰性初始化，读一次配置）。
+///
+/// 与 WorkBuddy 侧 [`crate::process_shared_state`] 同源同理：宿主此前各持一份
+/// `OnceLock`（`buddy-switch-server` 的 `trae_gateway_host.rs` 与 `src-tauri` 的
+/// `trae_gateway.rs`）。两个独立进程时各一份无碍；桌面端在同一进程里同时托管
+/// webui 服务与管理命令后，两份 `static` 会让网页端与桌面端看到不同的账号池 /
+/// Key / 请求日志。下沉到本模块后，同一进程内的所有宿主取到的是同一份。
+pub fn process_shared_state() -> TraeGatewayState {
+    static SHARED: OnceLock<TraeGatewayState> = OnceLock::new();
+    SHARED
+        .get_or_init(|| TraeGatewayState::new(TraeGatewayConfig::load()))
+        .clone()
+}
 
 /// 组装 Trae 网关路由（**不含 fallback**）。
 ///

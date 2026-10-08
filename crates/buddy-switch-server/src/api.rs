@@ -55,6 +55,17 @@ struct Assets;
 static SWITCH_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
 static SWITCH_RUNNING: Mutex<bool> = Mutex::new(false);
 
+/// 实际绑定的 webui 端口（由宿主在启动成功后写入）。
+///
+/// 独立运行（`main.rs::serve`）与桌面端内置（`src-tauri` 的 `webui_host::serve`）
+/// 都会写入它，因此浏览器侧 `GET /api/webui/info` 在两种形态下都能返回真实端口。
+static BOUND_PORT: Mutex<Option<u16>> = Mutex::new(None);
+
+/// 记录实际绑定的端口（宿主启动成功后调用，见 [`BOUND_PORT`]）。
+pub fn set_bound_port(port: u16) {
+    *BOUND_PORT.lock().unwrap() = Some(port);
+}
+
 /// webui 对外路由。
 ///
 /// **merge 顺序（关键，A-1.3 / B-6 要点 12）**：先构造**不含 fallback** 的
@@ -71,6 +82,7 @@ pub fn router() -> Router {
 fn api_routes() -> Router {
     Router::new()
         .route("/api/status", get(api_status))
+        .route("/api/webui/info", get(api_webui_info))
         .route("/api/accounts", get(api_accounts))
         .route("/api/accounts/open-dir", post(api_open_accounts_dir))
         .route("/api/codebuddy-cli/status", get(api_codebuddy_cli_status))
@@ -247,6 +259,22 @@ fn json_ok(v: Value) -> Response {
 
 fn json_err(e: String, code: StatusCode) -> Response {
     (code, Json(json!({ "ok": false, "error": e }))).into_response()
+}
+
+/// GET /api/webui/info —— 本地 webui 的接入信息（设置页「本地 WebUI」卡片用）。
+///
+/// 端口取宿主写入的 [`BOUND_PORT`]（独立运行是 `buddy-switch serve`，桌面端内置是
+/// `webui_host::serve`），因此两种形态下都返回**真实**端口而非默认值。
+async fn api_webui_info() -> Response {
+    let port = *BOUND_PORT.lock().unwrap();
+    match port {
+        Some(port) => json_ok(json!({
+            "enabled": true,
+            "port": port,
+            "url": format!("http://127.0.0.1:{port}"),
+        })),
+        None => json_ok(json!({ "enabled": false, "port": null, "url": null })),
+    }
 }
 
 // ---------------------------------------------------------------------------

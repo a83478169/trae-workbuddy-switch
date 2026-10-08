@@ -7,9 +7,7 @@
 //! buddy-switch version      # 版本号
 //! ```
 
-mod api;
-mod gateway_host;
-mod trae_gateway_host;
+use buddy_switch_server::{api, gateway_host, trae_gateway_host};
 
 use serde_json::json;
 
@@ -310,6 +308,10 @@ async fn serve(args: &[String]) {
             std::process::exit(1);
         }
     };
+    // 记录**实际**绑定端口，供设置页的「本地 WebUI」卡片（`GET /api/webui/info`）读取。
+    if let Ok(local) = listener.local_addr() {
+        api::set_bound_port(local.port());
+    }
 
     println!("Buddy Switch v{}", update::APP_VERSION);
     println!("webui: http://{addr}");

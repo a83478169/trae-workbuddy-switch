@@ -11,16 +11,17 @@ use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
 
-use buddy_switch_gateway::{spawn_listener_with_state, GatewayConfig, GatewayHandle, GatewayState};
+use buddy_switch_gateway::{spawn_listener_with_state, GatewayHandle, GatewayState};
 
-static SHARED_STATE: OnceLock<GatewayState> = OnceLock::new();
 static HOST: OnceLock<Mutex<GatewayHost>> = OnceLock::new();
 
-/// 进程内共享的网关状态（惰性初始化，读一次配置）。
+/// 进程内共享的网关状态。
+///
+/// **委托**给 gateway crate 的每进程单例（[`buddy_switch_gateway::process_shared_state`]），
+/// 不再自建 `OnceLock`：桌面端会在**同一个进程**里同时托管 webui 服务与管理命令，
+/// 自建会让网页端与桌面端各持一份 [`GatewayState`]，配置 / Key 互不可见。
 pub fn shared_state() -> GatewayState {
-    SHARED_STATE
-        .get_or_init(|| GatewayState::new(GatewayConfig::load()))
-        .clone()
+    buddy_switch_gateway::process_shared_state()
 }
 
 /// 独立监听生命周期管理。
