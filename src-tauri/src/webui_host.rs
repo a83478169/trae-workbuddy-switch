@@ -70,6 +70,9 @@ pub async fn serve(app: tauri::AppHandle) -> Result<(), String> {
     }
     // 同步给 server crate：浏览器侧 `GET /api/webui/info` 读的就是它。
     buddy_switch_server::api::set_bound_port(addr.port());
+    // 载入 WebUI 访问密码配置（`None` = 未设密码 → 认证中间件放行）。
+    // 桌面端保存密码时会在同进程内更新它，因此改密码立即生效。
+    buddy_switch_server::api::set_webui_auth(buddy_switch_core::modules::webui_auth::load());
     eprintln!("[webui] 已启动: http://{addr}");
     axum::serve(listener, buddy_switch_server::api::router())
         .await

@@ -36,3 +36,4 @@ pub mod travel;
 pub mod update;
 pub mod upstream;
 pub mod vscode_cn_inject;
+pub mod webui_auth;

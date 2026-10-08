@@ -13,6 +13,7 @@ use serde_json::json;
 
 use buddy_switch_core::modules::{
     account, auth_file, config, process, region::Region, rotate, schedule, scheduler, trae, update,
+    webui_auth,
 };
 
 fn default_port() -> u16 {
@@ -312,6 +313,9 @@ async fn serve(args: &[String]) {
     if let Ok(local) = listener.local_addr() {
         api::set_bound_port(local.port());
     }
+    // 载入 WebUI 访问密码配置（`None` = 未设密码 → 认证中间件放行）。
+    // ⚠️ 独立运行的进程只在启动时读一次：经由桌面端改了密码需重启本进程才生效。
+    api::set_webui_auth(webui_auth::load());
 
     println!("Buddy Switch v{}", update::APP_VERSION);
     println!("webui: http://{addr}");

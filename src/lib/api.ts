@@ -42,6 +42,7 @@ import type {
   TravelConfig,
   TravelStatus,
   UpdateInfo,
+  WebuiAuth,
   WebuiInfo,
 } from "./types";
 import { demoModeEnabled, demoUnavailableMessage } from "./demo-mode";
@@ -159,6 +160,8 @@ type Route = { method: "GET" | "POST"; path: string };
 const ROUTES: Record<string, Route> = {
   get_status: { method: "GET", path: "/api/status" },
   get_webui_info: { method: "GET", path: "/api/webui/info" },
+  get_webui_auth: { method: "GET", path: "/api/webui/auth" },
+  set_webui_auth: { method: "POST", path: "/api/webui/auth" },
   get_accounts: { method: "GET", path: "/api/accounts" },
   get_codebuddy_cli_status: { method: "GET", path: "/api/codebuddy-cli/status" },
   install_codebuddy_cli_helper: { method: "POST", path: "/api/codebuddy-cli/install-helper" },
@@ -400,6 +403,16 @@ export function getStatus(region?: Region): Promise<AppStatus> {
 /** 本地 WebUI 服务的接入信息（设置页「本地 WebUI」卡片）。 */
 export function getWebuiInfo(): Promise<WebuiInfo> {
   return call<WebuiInfo>("get_webui_info");
+}
+
+/** 本地 WebUI 是否已启用访问密码。 */
+export function getWebuiAuth(): Promise<WebuiAuth> {
+  return call<WebuiAuth>("get_webui_auth");
+}
+
+/** 设置 WebUI 访问密码（传空串 = 清除 / 关闭认证）。 */
+export function setWebuiAuth(password: string): Promise<WebuiAuth> {
+  return call<WebuiAuth>("set_webui_auth", { password });
 }
 
 export function getAccounts(region?: Region): Promise<{ accounts: AccountMeta[] }> {

@@ -25,6 +25,8 @@ rust-embed = "8"
 [dev-dependencies]
 # `tower` 已在 Cargo.lock（axum 0.7 的传递依赖），仅用于路由级测试的 `oneshot` 驱动。
 tower = { version = "0.5", features = ["util"] }
+# 认证中间件的测试要自己拼 `Authorization: Basic <base64>`。
+base64 = "0.22"
 # `rusqlite` 已在依赖树中（buddy-switch-core 以同版本同 feature 使用），零网络。
 # 仅用于路由级测试构造 `workbuddy.db` 夹具。
 rusqlite = { version = "0.32", features = ["bundled"] }

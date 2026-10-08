@@ -3,13 +3,14 @@
 //! 路由设计对应 Python 版 server.py 与桌面端 commands.rs。仅绑定 127.0.0.1，
 //! token 不出本机。
 
+use std::collections::HashMap;
 use std::sync::Mutex;
-#[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::RawQuery;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{header, Method, Request, StatusCode, Uri};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -19,7 +20,7 @@ use serde_json::{json, Value};
 use buddy_switch_core::modules::{
     account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, config, credit_usage, credits, export_import,
     migrate, oauth, process, refresh, region::Region, region::RegionFilter, rotate, schedule, scheduler,
-    session, switch, token_stats, trae, travel, update,
+    session, switch, token_stats, trae, travel, update, webui_auth,
 };
 use buddy_switch_gateway::{GatewayConfig, GatewayStatusView};
 
@@ -66,6 +67,168 @@ pub fn set_bound_port(port: u16) {
     *BOUND_PORT.lock().unwrap() = Some(port);
 }
 
+// ---------------------------------------------------------------------------
+// WebUI 访问密码（Basic Auth）
+// ---------------------------------------------------------------------------
+//
+// 用途：用户会把 webui 通过**反向代理**暴露到公网，需要一道密码。方案是
+// HTTP Basic Auth —— 浏览器原生弹窗，**所有**请求（含 HTML/JS/CSS 静态资源）
+// 都要先过认证，未登录连页面代码都拿不到，因此最难绕过；且前端零改动。
+
+/// WebUI 访问密码配置（**进程内单例**）。`None` = 未启用认证。
+///
+/// 宿主在启动时用 [`webui_auth::load`] 写入（桌面端 `webui_host::serve`、
+/// 独立运行 `main.rs::serve`），桌面端保存密码时更新。
+///
+/// 为什么用内存单例而不是每个请求读盘：中间件在**每个**请求上跑，读盘又慢、
+/// 又会让单元测试依赖真实 home（用户本机设了密码就会把测试带红）。单例让
+/// 两端共享同一份值，且测试不 `set` 就是 `None`（放行）。
+static WEBUI_AUTH: Mutex<Option<webui_auth::WebuiAuthConfig>> = Mutex::new(None);
+
+/// 已通过认证的凭据缓存：`authorization header + 当前密码哈希` → 通过时间。
+///
+/// Basic Auth 的每个请求都要验一次，而 PBKDF2 迭代 10 万次 ≈ 几十毫秒 ——
+/// 一次页面加载要发十几个请求，不缓存会明显变慢。**只缓存成功**（失败不缓存，
+/// 否则攻击者可用伪造凭据把缓存撑满）。key 里带上**当前密码哈希**，因此改密码后
+/// 旧条目自然不命中（`set_webui_auth` 也会整体清空）。
+static AUTH_OK: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+
+/// 连续认证失败次数（用于退避）。
+///
+/// **全局**而非按 IP：反代下 peer 恒为 127.0.0.1、`X-Forwarded-For` 可伪造，
+/// 按 IP 限速没有意义。
+static AUTH_FAILS: Mutex<u32> = Mutex::new(0);
+
+/// 凭据缓存有效期。
+const AUTH_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+/// 凭据缓存条数上限（超过即整体清空，防止被大量不同凭据撑爆内存）。
+const AUTH_CACHE_MAX: usize = 128;
+/// 连续失败多少次后开始退避。
+const AUTH_BACKOFF_AFTER: u32 = 5;
+/// 退避步长与上限。
+const AUTH_BACKOFF_STEP: Duration = Duration::from_millis(400);
+const AUTH_BACKOFF_MAX: Duration = Duration::from_secs(4);
+/// 密码长度上限：在喂给 PBKDF2 之前拦住超长输入。
+const AUTH_PASSWORD_MAX: usize = 256;
+
+/// 设置 WebUI 访问密码配置（`None` = 关闭认证）。宿主调用。
+pub fn set_webui_auth(config: Option<webui_auth::WebuiAuthConfig>) {
+    *WEBUI_AUTH.lock().unwrap() = config;
+    AUTH_OK.lock().unwrap().clear();
+    *AUTH_FAILS.lock().unwrap() = 0;
+}
+
+/// 认证中间件：未启用认证时放行；启用时要求 `Authorization: Basic <base64>`。
+///
+/// 用户名被忽略（见 [`webui_auth::password_from_basic_header`]），只校验密码。
+async fn require_auth(request: Request<Body>, next: Next) -> Response {
+    // 先取配置并**立刻释放锁** —— 后面有 await，不能跨 await 持 guard。
+    let config = WEBUI_AUTH.lock().unwrap().clone();
+    let Some(config) = config else {
+        // 未设密码 —— 本地使用的默认。此时 webui 完全不设防，设置页会明确警告。
+        return next.run(request).await;
+    };
+
+    // CSRF 闸门。Basic 凭据是「环境式」的：浏览器缓存后会对**跨站**表单 / 子资源
+    // 请求自动携带。带 body 的 handler 会被 `Json` 抽取器挡住（content-type 不符即
+    // 拒绝），但 `api_rotate_run` 这类**无 body** 的 POST 会被跨站 `<form>` 触发，
+    // 所以这里统一要求写操作是 JSON —— 前端 `httpCall` 恰好永远发
+    // `Content-Type: application/json` 且 POST 永远带 body，故不影响正常调用。
+    if !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        let is_json = request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"));
+        let cross_site = request
+            .headers()
+            .get("sec-fetch-site")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"));
+        if !is_json || cross_site {
+            return forbidden();
+        }
+    }
+
+    // 退避放在**派生之前**：PBKDF2 是 CPU 密集的，攻击者用变化凭据刷端口就能打满
+    // CPU —— 只在失败之后 sleep 挡不住这一点。
+    auth_backoff().await;
+
+    let Some(header) = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+    else {
+        return unauthorized();
+    };
+
+    let cache_key = format!("{header}\u{1}{}", config.hash);
+    if let Some(at) = AUTH_OK.lock().unwrap().get(&cache_key) {
+        if at.elapsed() < AUTH_CACHE_TTL {
+            return next.run(request).await;
+        }
+    }
+
+    let Some(password) = webui_auth::password_from_basic_header(&header) else {
+        return unauthorized();
+    };
+    if password.len() > AUTH_PASSWORD_MAX {
+        return unauthorized();
+    }
+
+    // PBKDF2 是同步 CPU 活（10 万次迭代），放 `spawn_blocking` 避免堵住 reactor。
+    let ok = tokio::task::spawn_blocking(move || webui_auth::verify_password(&config, &password))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        *AUTH_FAILS.lock().unwrap() += 1;
+        return unauthorized();
+    }
+    *AUTH_FAILS.lock().unwrap() = 0;
+
+    {
+        let mut cache = AUTH_OK.lock().unwrap();
+        if cache.len() >= AUTH_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(cache_key, Instant::now());
+    }
+    next.run(request).await
+}
+
+/// 连续失败后的退避延迟（在 PBKDF2 之前 await）。
+async fn auth_backoff() {
+    let fails = *AUTH_FAILS.lock().unwrap();
+    if fails < AUTH_BACKOFF_AFTER {
+        return;
+    }
+    let steps = fails - AUTH_BACKOFF_AFTER + 1;
+    let delay = AUTH_BACKOFF_STEP.saturating_mul(steps).min(AUTH_BACKOFF_MAX);
+    tokio::time::sleep(delay).await;
+}
+
+/// 401 + `WWW-Authenticate`（浏览器据此弹出登录框）。
+///
+/// realm 必须是 ASCII 且加引号，否则浏览器不弹窗；`charset="UTF-8"` 告诉浏览器
+/// 用 UTF-8 编码非 ASCII 密码（RFC 7617）。
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(
+            header::WWW_AUTHENTICATE,
+            r#"Basic realm="Buddy Switch", charset="UTF-8""#,
+        )],
+        "Unauthorized",
+    )
+        .into_response()
+}
+
+/// 403：写操作不是 JSON，或是跨站发起（CSRF 闸门）。
+fn forbidden() -> Response {
+    (StatusCode::FORBIDDEN, "Forbidden").into_response()
+}
+
 /// webui 对外路由。
 ///
 /// **merge 顺序（关键，A-1.3 / B-6 要点 12）**：先构造**不含 fallback** 的
@@ -73,9 +236,14 @@ pub fn set_bound_port(port: u16) {
 /// 否则 axum 会因 fallback 冲突直接 panic。
 pub fn router() -> Router {
     let gateway_state = crate::gateway_host::shared_state();
-    api_routes()
-        .merge(buddy_switch_gateway::router(gateway_state))
+    // 认证只覆盖**管理面 + 静态资源**：`Router::layer` 作用于**已添加**的路由与
+    // fallback（axum 文档明示「之后再 add 的路由不会被套上」），所以 `merge` 进来的
+    // gateway 路由（`/v1/*`、`/healthz`）不受影响 —— 它们是给外部工具用的
+    // OpenAI 兼容 API，有各自的 API Key 鉴权，套 Basic Auth 会破坏既有用法。
+    let protected = api_routes()
         .fallback(static_handler)
+        .layer(axum::middleware::from_fn(require_auth));
+    protected.merge(buddy_switch_gateway::router(gateway_state))
 }
 
 /// 管理面 API 路由（**不含 fallback**）。
@@ -83,6 +251,10 @@ fn api_routes() -> Router {
     Router::new()
         .route("/api/status", get(api_status))
         .route("/api/webui/info", get(api_webui_info))
+        .route(
+            "/api/webui/auth",
+            get(api_webui_auth).post(api_set_webui_auth),
+        )
         .route("/api/accounts", get(api_accounts))
         .route("/api/accounts/open-dir", post(api_open_accounts_dir))
         .route("/api/codebuddy-cli/status", get(api_codebuddy_cli_status))
@@ -275,6 +447,34 @@ async fn api_webui_info() -> Response {
         })),
         None => json_ok(json!({ "enabled": false, "port": null, "url": null })),
     }
+}
+
+/// GET /api/webui/auth —— 是否已启用 WebUI 访问密码（**不返回密码或哈希**）。
+async fn api_webui_auth() -> Response {
+    json_ok(json!({ "enabled": webui_auth::load().is_some() }))
+}
+
+/// POST /api/webui/auth —— 设置 / 清除 WebUI 访问密码。
+///
+/// body：`{ "password": "..." }`；空串 / 缺省 = 清除（关闭认证）。
+/// 本路由挂在 `api_routes()` 上，即落在认证中间件**之内** —— 一旦启用密码，
+/// 改密码必须先通过认证，未认证者改不了。
+async fn api_set_webui_auth(Json(body): Json<Value>) -> Response {
+    let password = body
+        .get("password")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let result = match password.as_deref() {
+        Some(value) if !value.trim().is_empty() => webui_auth::set_password(value),
+        _ => webui_auth::clear(),
+    };
+    if let Err(error) = result {
+        return json_err(error.to_string(), StatusCode::BAD_REQUEST);
+    }
+    // 同进程立即生效（桌面端内置 webui 的形态）。
+    let enabled = webui_auth::load().is_some();
+    set_webui_auth(webui_auth::load());
+    json_ok(json!({ "enabled": enabled }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2003,7 +2203,13 @@ fn content_type(path: &str) -> &'static str {
 /// 因此实际效果就是每次重新取（`index.html` 约 1 KB，代价可忽略），换取「永远不会陈旧」。
 fn cache_control_for(served_path: &str) -> &'static str {
     if served_path.starts_with("assets/") {
-        "public, max-age=31536000, immutable"
+        // 开了访问密码就降为 `private`：共享缓存（反代 / CDN）不得把 SPA 外壳
+        // 喂给未认证的请求。未开认证时维持 `public`（本地使用，无此顾虑）。
+        if WEBUI_AUTH.lock().unwrap().is_some() {
+            "private, max-age=31536000, immutable"
+        } else {
+            "public, max-age=31536000, immutable"
+        }
     } else {
         "no-cache"
     }
@@ -2195,6 +2401,213 @@ mod tests {
             .unwrap_or("")
             .to_string();
         (status, value)
+    }
+
+    // -----------------------------------------------------------------------
+    // WebUI 访问密码（Basic Auth）
+    // -----------------------------------------------------------------------
+
+    /// 设置进程级认证配置，`Drop` 时复位 —— 认证单例是**全测试共享**的。
+    struct AuthGuard;
+
+    impl AuthGuard {
+        fn set(password: &str) -> Self {
+            set_webui_auth(Some(webui_auth::hash_password(password)));
+            AuthGuard
+        }
+    }
+
+    impl Drop for AuthGuard {
+        fn drop(&mut self) {
+            set_webui_auth(None);
+        }
+    }
+
+    /// 构造一个 `Authorization: Basic ...` 头（用户名随意，只校验密码）。
+    fn basic_credentials(password: &str) -> String {
+        use base64::Engine as _;
+        let raw = format!("whatever:{password}");
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+        )
+    }
+
+    /// 驱动完整 `router()`（**含认证中间件**），只返回状态码。
+    async fn status_of(
+        method: Method,
+        uri: &str,
+        auth: Option<&str>,
+        content_type: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(value) = auth {
+            builder = builder.header("authorization", value);
+        }
+        if let Some(value) = content_type {
+            builder = builder.header("content-type", value);
+        }
+        router()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .expect("router call")
+            .status()
+    }
+
+    /// ★ 核心断言：设了密码以后，**静态路径与 API 都必须先认证**。
+    /// 「不能被绕过进入任何 web 页面」= 未登录连 index.html / JS 都拿不到。
+    #[tokio::test]
+    async fn auth_guards_static_and_api_paths() {
+        let _lock = test_guard();
+        isolated_home();
+        let _guard = AuthGuard::set("s3cret");
+
+        for uri in [
+            "/",
+            "/index.html",
+            "/accounts",
+            "/api/status",
+            "/api/definitely-missing",
+        ] {
+            assert_eq!(
+                status_of(Method::GET, uri, None, None).await,
+                StatusCode::UNAUTHORIZED,
+                "{uri} 未认证时必须 401"
+            );
+        }
+
+        let credentials = basic_credentials("s3cret");
+        assert_eq!(
+            status_of(Method::GET, "/api/status", Some(&credentials), None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_of(Method::GET, "/", Some(&credentials), None).await,
+            StatusCode::OK
+        );
+    }
+
+    /// 路径大小写 / 多余斜杠 / `..` / 百分号编码都不能绕过认证。
+    #[tokio::test]
+    async fn auth_survives_path_tricks() {
+        let _lock = test_guard();
+        isolated_home();
+        let _guard = AuthGuard::set("s3cret");
+
+        for uri in ["/API/status", "/api//status", "/api/../api/status", "/api/%73tatus"] {
+            assert_eq!(
+                status_of(Method::GET, uri, None, None).await,
+                StatusCode::UNAUTHORIZED,
+                "{uri} 不得绕过认证"
+            );
+        }
+    }
+
+    /// 网关路由（`/healthz`、`/v1/*`）**不受** Basic Auth 保护 —— 它们有各自的
+    /// API Key 鉴权，套上会破坏外部工具的既有用法。
+    #[tokio::test]
+    async fn auth_does_not_cover_gateway_routes() {
+        let _lock = test_guard();
+        isolated_home();
+        let _guard = AuthGuard::set("s3cret");
+
+        assert_ne!(
+            status_of(Method::GET, "/healthz", None, None).await,
+            StatusCode::UNAUTHORIZED,
+            "/healthz 不应被 Basic Auth 拦下"
+        );
+    }
+
+    /// 改密码后旧凭据立即失效（同时证明缓存 key 含当前密码哈希）。
+    #[tokio::test]
+    async fn auth_password_change_invalidates_old_credentials() {
+        let _lock = test_guard();
+        isolated_home();
+        let old = basic_credentials("old-pass");
+        let new = basic_credentials("new-pass");
+
+        {
+            let _guard = AuthGuard::set("old-pass");
+            // 先访问一次，把「通过」结果写进缓存。
+            assert_eq!(
+                status_of(Method::GET, "/api/status", Some(&old), None).await,
+                StatusCode::OK
+            );
+        }
+        {
+            let _guard = AuthGuard::set("new-pass");
+            assert_eq!(
+                status_of(Method::GET, "/api/status", Some(&old), None).await,
+                StatusCode::UNAUTHORIZED,
+                "旧密码必须失效"
+            );
+            assert_eq!(
+                status_of(Method::GET, "/api/status", Some(&new), None).await,
+                StatusCode::OK
+            );
+        }
+    }
+
+    /// 错误 / 畸形的凭据一律 401。
+    #[tokio::test]
+    async fn auth_rejects_bad_credentials() {
+        let _lock = test_guard();
+        isolated_home();
+        let _guard = AuthGuard::set("s3cret");
+        let wrong = basic_credentials("wrong");
+
+        for header in ["Basic !!!not-base64!!!", "Bearer abc", "Basic", wrong.as_str()] {
+            assert_eq!(
+                status_of(Method::GET, "/api/status", Some(header), None).await,
+                StatusCode::UNAUTHORIZED,
+                "{header} 必须被拒绝"
+            );
+        }
+    }
+
+    /// CSRF 闸门：带正确凭据、但不是 JSON 的写操作必须 403（否则跨站表单可触发
+    /// 无 body 的 POST，如 `/api/rotate/run`）。
+    #[tokio::test]
+    async fn auth_csrf_guard_rejects_non_json_writes() {
+        let _lock = test_guard();
+        isolated_home();
+        let _guard = AuthGuard::set("s3cret");
+        let credentials = basic_credentials("s3cret");
+
+        assert_eq!(
+            status_of(
+                Method::POST,
+                "/api/rotate/run",
+                Some(&credentials),
+                Some("text/plain")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_ne!(
+            status_of(
+                Method::POST,
+                "/api/rotate/run",
+                Some(&credentials),
+                Some("application/json")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// 未设密码时行为完全不变（本地使用的默认）。
+    #[tokio::test]
+    async fn auth_disabled_keeps_legacy_behavior() {
+        let _lock = test_guard();
+        isolated_home();
+        set_webui_auth(None);
+
+        assert_eq!(status_of(Method::GET, "/", None, None).await, StatusCode::OK);
+        assert_eq!(
+            status_of(Method::GET, "/api/status", None, None).await,
+            StatusCode::OK
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowUpCircle, Copy, ExternalLink, Loader2, RefreshCw, Save, Settings2 } from "lucide-react";
+import { ArrowUpCircle, Copy, Eye, EyeOff, ExternalLink, Loader2, RefreshCw, Save, Settings2, ShieldAlert, ShieldCheck } from "lucide-react";
 
 import { DemoAction } from "@/components/demo-action";
 import { SettingsFieldRow, SettingsGroup } from "@/components/settings-primitives";
@@ -431,6 +431,11 @@ function WebuiCard() {
   const t = useT();
   const [info, setInfo] = useState<WebuiInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -442,6 +447,14 @@ function WebuiCard() {
       .catch((e) => {
         if (!cancelled) setError(api.asError(e));
       });
+    void api
+      .getWebuiAuth()
+      .then((value) => {
+        if (!cancelled) setAuthEnabled(value.enabled);
+      })
+      .catch(() => {
+        // 读不到就按「未启用」显示；保存后的返回值才是权威。
+      });
     return () => {
       cancelled = true;
     };
@@ -449,11 +462,44 @@ function WebuiCard() {
 
   const url = info?.url ?? null;
 
+  async function save() {
+    const value = password.trim();
+    if (!value) {
+      setMsg({ type: "err", text: t("appSettings.webui.auth.empty") });
+      return;
+    }
+    setSaving(true);
+    setMsg(null);
+    try {
+      const result = await api.setWebuiAuth(value);
+      setAuthEnabled(result.enabled);
+      setPassword("");
+      setMsg({ type: "ok", text: t("appSettings.webui.auth.saved") });
+    } catch (e) {
+      setMsg({ type: "err", text: api.asError(e) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function clear() {
+    setSaving(true);
+    setMsg(null);
+    try {
+      const result = await api.setWebuiAuth("");
+      setAuthEnabled(result.enabled);
+      setMsg({ type: "ok", text: t("appSettings.webui.auth.cleared") });
+    } catch (e) {
+      setMsg({ type: "err", text: api.asError(e) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <SettingsGroup id="settings-webui" title={t("appSettings.webui.title")}>
       <CardContent className="space-y-0 p-0">
         <SettingsFieldRow
-          className="border-b-0"
           label={t("appSettings.webui.label")}
           description={t("appSettings.webui.description")}
         >
@@ -481,7 +527,81 @@ function WebuiCard() {
             </Button>
           </div>
         </SettingsFieldRow>
+
+        {/* 访问密码：Basic Auth。未启用时明确警告 —— 一旦经反代暴露到公网，
+            没有密码等于对全网开放。 */}
+        <SettingsFieldRow
+          className="border-b-0"
+          label={
+            <span className="flex items-center gap-1.5">
+              {authEnabled ? (
+                <ShieldCheck className="size-3.5" />
+              ) : (
+                <ShieldAlert className="size-3.5" />
+              )}
+              {t("appSettings.webui.auth.label")}
+            </span>
+          }
+          description={
+            authEnabled
+              ? t("appSettings.webui.auth.onDescription")
+              : t("appSettings.webui.auth.offDescription")
+          }
+          htmlFor="webui-password"
+        >
+          <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
+            <div className="relative w-full sm:w-56">
+              <Input
+                id="webui-password"
+                type={showPassword ? "text" : "password"}
+                className="h-8 pr-8"
+                value={password}
+                autoComplete="new-password"
+                placeholder={
+                  authEnabled
+                    ? t("appSettings.webui.auth.changePlaceholder")
+                    : t("appSettings.webui.auth.placeholder")
+                }
+                onChange={(event) => setPassword(event.target.value)}
+              />
+              <button
+                type="button"
+                className="absolute inset-y-0 right-1.5 flex items-center text-muted-foreground hover:text-foreground"
+                onClick={() => setShowPassword((value) => !value)}
+                aria-label={
+                  showPassword
+                    ? t("appSettings.webui.auth.hide")
+                    : t("appSettings.webui.auth.show")
+                }
+              >
+                {showPassword ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+              </button>
+            </div>
+            <Button size="sm" variant="outline" disabled={saving} onClick={() => void save()}>
+              {saving ? <Loader2 className="animate-spin" /> : <Save />}
+              {t("appSettings.webui.auth.save")}
+            </Button>
+            {authEnabled ? (
+              <Button size="sm" variant="ghost" disabled={saving} onClick={() => void clear()}>
+                {t("appSettings.webui.auth.clear")}
+              </Button>
+            ) : null}
+          </div>
+        </SettingsFieldRow>
       </CardContent>
+
+      {msg ? (
+        <div className="px-4 pb-3 sm:px-5">
+          <p
+            className={cn(
+              "text-xs",
+              msg.type === "err" ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {msg.text}
+          </p>
+        </div>
+      ) : null}
     </SettingsGroup>
   );
 }

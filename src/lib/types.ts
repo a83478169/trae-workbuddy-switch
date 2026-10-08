@@ -562,6 +562,11 @@ export interface WebuiInfo {
   url: string | null;
 }
 
+/** 本地 WebUI 是否启用了访问密码（**只回状态，不含密码或哈希**）。 */
+export interface WebuiAuth {
+  enabled: boolean;
+}
+
 export interface UpdateInfo {
   ok: boolean;
   current?: string;

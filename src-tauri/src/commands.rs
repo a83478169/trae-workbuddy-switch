@@ -11,7 +11,7 @@ use tauri::{Emitter, Manager};
 use buddy_switch_core::modules::{
     account, auth_file, capability, checkin, codebuddy_cli, codebuddy_cn_ide, credit_usage, credits, export_import,
     migrate, oauth, process, refresh, region::Region, region::RegionFilter, rotate, session, switch, token_stats, trae,
-    travel, update,
+    travel, update, webui_auth,
 };
 use buddy_switch_gateway::{AccountStrategy, GatewayConfig, GatewayStatusView};
 
@@ -1123,6 +1123,27 @@ pub fn get_webui_info(app: tauri::AppHandle) -> Value {
         }),
         None => json!({ "enabled": false, "port": Value::Null, "url": Value::Null }),
     }
+}
+
+/// GET /api/webui/auth —— 是否已启用 WebUI 访问密码（**不返回密码或哈希**）。
+#[tauri::command]
+pub fn get_webui_auth() -> Value {
+    json!({ "enabled": webui_auth::load().is_some() })
+}
+
+/// POST /api/webui/auth —— 设置 / 清除 WebUI 访问密码（空串 / 缺省 = 清除）。
+///
+/// 保存后**同进程立即生效**（桌面端内置 webui 与桌面命令在同一进程）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_webui_auth(password: Option<String>) -> Result<Value, String> {
+    let result = match password.as_deref() {
+        Some(value) if !value.trim().is_empty() => webui_auth::set_password(value),
+        _ => webui_auth::clear(),
+    };
+    result.map_err(|error| error.to_string())?;
+    let enabled = webui_auth::load().is_some();
+    buddy_switch_server::api::set_webui_auth(webui_auth::load());
+    Ok(json!({ "enabled": enabled }))
 }
 
 /// GET /api/gateway/status —— 运行状态。
