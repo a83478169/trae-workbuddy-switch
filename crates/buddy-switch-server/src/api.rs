@@ -4,11 +4,11 @@
 //! token 不出本机。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::RawQuery;
+use axum::extract::{RawQuery, State};
 use axum::http::{header, Method, Request, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -91,7 +91,14 @@ static WEBUI_AUTH: Mutex<Option<webui_auth::WebuiAuthConfig>> = Mutex::new(None)
 /// 一次页面加载要发十几个请求，不缓存会明显变慢。**只缓存成功**（失败不缓存，
 /// 否则攻击者可用伪造凭据把缓存撑满）。key 里带上**当前密码哈希**，因此改密码后
 /// 旧条目自然不命中（`set_webui_auth` 也会整体清空）。
-static AUTH_OK: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+///
+/// ⚠️ 用 `OnceLock` 而不是 `Mutex::new(HashMap::new())`：`HashMap::new()` **不是
+/// `const fn`**，不能用于 `static` 初始化（E0015）。
+static AUTH_OK: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn auth_ok() -> &'static Mutex<HashMap<String, Instant>> {
+    AUTH_OK.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// 连续认证失败次数（用于退避）。
 ///
@@ -114,14 +121,24 @@ const AUTH_PASSWORD_MAX: usize = 256;
 /// 设置 WebUI 访问密码配置（`None` = 关闭认证）。宿主调用。
 pub fn set_webui_auth(config: Option<webui_auth::WebuiAuthConfig>) {
     *WEBUI_AUTH.lock().unwrap() = config;
-    AUTH_OK.lock().unwrap().clear();
+    auth_ok().lock().unwrap().clear();
     *AUTH_FAILS.lock().unwrap() = 0;
 }
 
 /// 认证中间件：未启用认证时放行；启用时要求 `Authorization: Basic <base64>`。
 ///
 /// 用户名被忽略（见 [`webui_auth::password_from_basic_header`]），只校验密码。
-async fn require_auth(request: Request<Body>, next: Next) -> Response {
+///
+/// ⚠️ 第一个 `State<()>` 是个**用不到的占位提取器**：`axum::middleware::from_fn`
+/// 的 `Service` 实现由宏按 **1 元及以上**的提取器元组生成，**不覆盖 0 元组** ——
+/// 写成 `async fn(Request, Next)` 会报 `Service ... is not satisfied`。真正的配置
+/// 读进程级单例 [`WEBUI_AUTH`]。项目里 `trae::routes::bearer_auth` 是同样的形状
+/// （它带的是 `State<TraeGatewayState>`），配 `from_fn_with_state` 使用。
+async fn require_auth(
+    State(_): State<()>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
     // 先取配置并**立刻释放锁** —— 后面有 await，不能跨 await 持 guard。
     let config = WEBUI_AUTH.lock().unwrap().clone();
     let Some(config) = config else {
@@ -134,7 +151,10 @@ async fn require_auth(request: Request<Body>, next: Next) -> Response {
     // 拒绝），但 `api_rotate_run` 这类**无 body** 的 POST 会被跨站 `<form>` 触发，
     // 所以这里统一要求写操作是 JSON —— 前端 `httpCall` 恰好永远发
     // `Content-Type: application/json` 且 POST 永远带 body，故不影响正常调用。
-    if !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+    if !matches!(
+        request.method(),
+        &Method::GET | &Method::HEAD | &Method::OPTIONS
+    ) {
         let is_json = request
             .headers()
             .get(header::CONTENT_TYPE)
@@ -164,7 +184,7 @@ async fn require_auth(request: Request<Body>, next: Next) -> Response {
     };
 
     let cache_key = format!("{header}\u{1}{}", config.hash);
-    if let Some(at) = AUTH_OK.lock().unwrap().get(&cache_key) {
+    if let Some(at) = auth_ok().lock().unwrap().get(&cache_key) {
         if at.elapsed() < AUTH_CACHE_TTL {
             return next.run(request).await;
         }
@@ -188,7 +208,7 @@ async fn require_auth(request: Request<Body>, next: Next) -> Response {
     *AUTH_FAILS.lock().unwrap() = 0;
 
     {
-        let mut cache = AUTH_OK.lock().unwrap();
+        let mut cache = auth_ok().lock().unwrap();
         if cache.len() >= AUTH_CACHE_MAX {
             cache.clear();
         }
@@ -242,7 +262,7 @@ pub fn router() -> Router {
     // OpenAI 兼容 API，有各自的 API Key 鉴权，套 Basic Auth 会破坏既有用法。
     let protected = api_routes()
         .fallback(static_handler)
-        .layer(axum::middleware::from_fn(require_auth));
+        .layer(axum::middleware::from_fn_with_state((), require_auth));
     protected.merge(buddy_switch_gateway::router(gateway_state))
 }
 
