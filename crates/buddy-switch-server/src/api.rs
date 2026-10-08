@@ -8,8 +8,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::{RawQuery, State};
-use axum::http::{header, Method, Request, StatusCode, Uri};
+use axum::extract::{RawQuery, Request, State};
+use axum::http::{header, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -125,18 +125,22 @@ pub fn set_webui_auth(config: Option<webui_auth::WebuiAuthConfig>) {
     *AUTH_FAILS.lock().unwrap() = 0;
 }
 
+/// 认证中间件的 state。
+///
+/// 中间件**必须带一个提取器**，且该提取器的类型要是**具体类型** ——
+/// 与 `trae::routes::bearer_auth` 完全同形（它带的是 `State<TraeGatewayState>`）。
+/// axum 的 `from_fn` impl 由宏生成，要求 `F` 的签名为
+/// `(提取器…, Request, Next)`，其中 `Request` 必须是 `axum::extract::Request`。
+/// 真正的配置读进程级单例 [`WEBUI_AUTH`]，这个 state 只是占位。
+#[derive(Clone)]
+struct AuthState;
+
 /// 认证中间件：未启用认证时放行；启用时要求 `Authorization: Basic <base64>`。
 ///
 /// 用户名被忽略（见 [`webui_auth::password_from_basic_header`]），只校验密码。
-///
-/// ⚠️ 第一个 `State<()>` 是个**用不到的占位提取器**：`axum::middleware::from_fn`
-/// 的 `Service` 实现由宏按 **1 元及以上**的提取器元组生成，**不覆盖 0 元组** ——
-/// 写成 `async fn(Request, Next)` 会报 `Service ... is not satisfied`。真正的配置
-/// 读进程级单例 [`WEBUI_AUTH`]。项目里 `trae::routes::bearer_auth` 是同样的形状
-/// （它带的是 `State<TraeGatewayState>`），配 `from_fn_with_state` 使用。
 async fn require_auth(
-    State(_): State<()>,
-    request: Request<Body>,
+    State(_): State<AuthState>,
+    request: Request,
     next: Next,
 ) -> Response {
     // 先取配置并**立刻释放锁** —— 后面有 await，不能跨 await 持 guard。
@@ -184,10 +188,18 @@ async fn require_auth(
     };
 
     let cache_key = format!("{header}\u{1}{}", config.hash);
-    if let Some(at) = auth_ok().lock().unwrap().get(&cache_key) {
-        if at.elapsed() < AUTH_CACHE_TTL {
-            return next.run(request).await;
-        }
+    // ⚠️ 必须先把锁的作用域收干净**再** await：`MutexGuard` 跨 await 会让整个
+    // future 变成 `!Send`，中间件因而不满足 `from_fn` 要求的 `Fut: Send`。
+    // 报出来的却是那句绕弯的 `Service ... is not satisfied`（看起来像提取器元组
+    // 推不出来），非常容易误诊 —— 别再写成 `if let Some(..) = guard.get(..) { ..await }`。
+    let cached = {
+        let cache = auth_ok().lock().unwrap();
+        cache
+            .get(&cache_key)
+            .is_some_and(|at| at.elapsed() < AUTH_CACHE_TTL)
+    };
+    if cached {
+        return next.run(request).await;
     }
 
     let Some(password) = webui_auth::password_from_basic_header(&header) else {
@@ -262,7 +274,10 @@ pub fn router() -> Router {
     // OpenAI 兼容 API，有各自的 API Key 鉴权，套 Basic Auth 会破坏既有用法。
     let protected = api_routes()
         .fallback(static_handler)
-        .layer(axum::middleware::from_fn_with_state((), require_auth));
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState,
+            require_auth,
+        ));
     protected.merge(buddy_switch_gateway::router(gateway_state))
 }
 
